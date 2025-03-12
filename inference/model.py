@@ -83,7 +83,8 @@ class ModelArgs:
     beta_slow: int = 1
     mscale: float = 1.
 
-
+# ParallelEmbedding 对限定区域进行处理，超出视野的数据不做处理。
+# 对tensor 进行embeding，使得用向量来表示信息，而不是一个个离散分布的标签
 class ParallelEmbedding(nn.Module):
     """
     Embedding layer with parallelism support across distributed processes.
@@ -116,16 +117,20 @@ class ParallelEmbedding(nn.Module):
             ValueError: If `world_size` is not defined.
         """
         if world_size > 1:
+            # 对 x 进行mask，依据是 超参  vocab_start_idx 和 vocab_end_idx
+            # 将 x[mask] 设置为0
+            # 说明 ParallelEmbedding 对限定区域进行处理，超出视野的数据直接丢弃
+            
             mask = (x < self.vocab_start_idx) | (x >= self.vocab_end_idx)
             x = x - self.vocab_start_idx
             x[mask] = 0
-        y = F.embedding(x, self.weight)
+        y = F.embedding(x, self.weight) # 将离散变量转变为空间中的向量，转变方式是通过权重矩阵（embbeding 矩阵）
         if world_size > 1:
             y[mask] = 0
-            dist.all_reduce(y)
+            dist.all_reduce(y) # 将不同device之间的tensor做reduce 操作，每个device 的shape 不变
         return y
 
-
+# 顾名思义，矩阵乘法，包含普通linear， 量化和反量化版本的linear
 def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None) -> torch.Tensor:
     """
     Applies a linear transformation to the incoming data: y = xA^T + b.
@@ -188,7 +193,7 @@ class Linear(nn.Module):
             self.bias = nn.Parameter(torch.empty(out_features))
         else:
             self.register_parameter("bias", None)
-
+    # 包装了一下linear 模块
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass for the custom linear layer.
@@ -201,7 +206,7 @@ class Linear(nn.Module):
         """
         return linear(x, self.weight, self.bias)
 
-
+# 切输出  [M,N]= [M,K]*[N,K]
 class ColumnParallelLinear(Linear):
     """
     Linear layer with column parallelism, splitting output features across distributed processes.
@@ -230,7 +235,7 @@ class ColumnParallelLinear(Linear):
         y = linear(x, self.weight, self.bias)
         return y
 
-
+# 切输入（KI），输入数据并行
 class RowParallelLinear(Linear):
     """
     Linear layer with row parallelism, splitting input features across distributed processes.
@@ -263,7 +268,7 @@ class RowParallelLinear(Linear):
             y += self.bias
         return y
 
-
+# x/l2_norm(x). RMS 平方根 norm
 class RMSNorm(nn.Module):
     """
     Root Mean Square Layer Normalization (RMSNorm).
